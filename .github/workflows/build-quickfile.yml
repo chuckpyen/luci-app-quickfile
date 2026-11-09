@@ -21,7 +21,7 @@ jobs:
       SDK_NAME: immortalwrt-sdk-25.12.2-x86-64_gcc-14.3.0_musl.Linux-x86_64
       SDK_BASE: https://downloads.immortalwrt.org/releases/25.12.2/targets/x86/64
       SDK_SHA256: 4d4631f134c2f27215a91aa7ef5bf9a01ea96c2450d3b8a5c38048c32462ac60
-      SDK_DIR: ${{ runner.temp }}/quickfile-sdk
+      SDK_DIR: /tmp/quickfile-sdk
 
     steps:
       - name: Check out QuickFile
@@ -115,8 +115,8 @@ jobs:
           name: quickfile-build-diagnostics
           path: |
             ${{ runner.temp }}/quickfile-build.log
-            ${{ runner.temp }}/quickfile-sdk/logs/
-            ${{ runner.temp }}/quickfile-sdk/.config
+            /tmp/quickfile-sdk/logs/
+            /tmp/quickfile-sdk/.config
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
