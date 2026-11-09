@@ -1,0 +1,122 @@
+name: Build QuickFile for ImmortalWrt 25.12.2
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quickfile-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: bash
+    env:
+      SDK_NAME: immortalwrt-sdk-25.12.2-x86-64_gcc-14.3.0_musl.Linux-x86_64
+      SDK_BASE: https://downloads.immortalwrt.org/releases/25.12.2/targets/x86/64
+      SDK_SHA256: 4d4631f134c2f27215a91aa7ef5bf9a01ea96c2450d3b8a5c38048c32462ac60
+      SDK_DIR: ${{ runner.temp }}/quickfile-sdk
+
+    steps:
+      - name: Check out QuickFile
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang flex bison g++ gawk gettext git \
+            libelf-dev libncurses-dev libssl-dev zlib1g-dev \
+            python3 python3-setuptools rsync swig unzip wget curl \
+            xsltproc zstd file
+
+      - name: Download and verify the matching SDK
+        run: |
+          mkdir -p "$SDK_DIR"
+          archive="$RUNNER_TEMP/$SDK_NAME.tar.zst"
+          curl --fail --location --retry 5 --output "$archive" \
+            "$SDK_BASE/$SDK_NAME.tar.zst"
+          printf '%s  %s\n' "$SDK_SHA256" "$archive" | sha256sum --check -
+          tar --zstd -xf "$archive" -C "$SDK_DIR" --strip-components=1
+
+      - name: Configure feeds and packages
+        run: |
+          # Pin feeds to the revisions published with ImmortalWrt 25.12.2.
+          cat > "$SDK_DIR/feeds.conf" <<'EOF'
+          src-git packages https://github.com/immortalwrt/packages.git^84bd86384928955b568988ca0e09e2c78c75173d
+          src-git luci https://github.com/immortalwrt/luci.git^d6167ea0645cbd1327708d85f94824f42d0eb872
+          EOF
+          mkdir -p "$SDK_DIR/package/quickfile"
+          cp -a quickfile luci-app-quickfile "$SDK_DIR/package/quickfile/"
+          cd "$SDK_DIR"
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          # Preserve the SDK target settings while selecting these packages.
+          sed -i -E '/^(# )?CONFIG_(ALL|ALL_NONSHARED|ALL_KMODS|LUCI_LANG_zh_Hans|PACKAGE_quickfile|PACKAGE_luci-app-quickfile|PACKAGE_luci-i18n-quickfile-zh-cn)(=| is not set)/d' .config
+          cat >> .config <<'EOF'
+          # CONFIG_ALL is not set
+          # CONFIG_ALL_NONSHARED is not set
+          # CONFIG_ALL_KMODS is not set
+          CONFIG_PACKAGE_quickfile=m
+          CONFIG_PACKAGE_luci-app-quickfile=m
+          CONFIG_LUCI_LANG_zh_Hans=y
+          CONFIG_PACKAGE_luci-i18n-quickfile-zh-cn=m
+          EOF
+          make defconfig
+          grep -qx 'CONFIG_PACKAGE_quickfile=m' .config
+          grep -qx 'CONFIG_PACKAGE_luci-app-quickfile=m' .config
+
+      - name: Compile QuickFile
+        run: |
+          cd "$SDK_DIR"
+          set -o pipefail
+          make package/quickfile/quickfile/compile -j2 V=s 2>&1 | tee "$RUNNER_TEMP/quickfile-build.log"
+          make package/quickfile/luci-app-quickfile/compile -j2 V=s 2>&1 | tee -a "$RUNNER_TEMP/quickfile-build.log"
+
+      - name: Collect and verify APK packages
+        run: |
+          mkdir -p dist
+          for prefix in quickfile luci-app-quickfile luci-i18n-quickfile-zh-cn; do
+            mapfile -t packages < <(find "$SDK_DIR/bin/packages" -type f -name "$prefix-*.apk")
+            if [ "${#packages[@]}" -ne 1 ]; then
+              echo "Expected one APK for $prefix, found ${#packages[@]}" >&2
+              exit 1
+            fi
+            cp "${packages[0]}" dist/
+          done
+          {
+            printf 'Firmware: ImmortalWrt 25.12.2\nArchitecture: x86_64\n'
+            printf 'Source repository: %s\nSource commit: %s\n' "$GITHUB_REPOSITORY" "$GITHUB_SHA"
+            printf 'SDK SHA256: %s\n' "$SDK_SHA256"
+            printf 'Build: https://github.com/%s/actions/runs/%s\n' "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+          } > dist/BUILD-INFO.txt
+          (cd dist && sha256sum ./*.apk > SHA256SUMS)
+
+      - name: Upload APK packages
+        uses: actions/upload-artifact@v6
+        with:
+          name: quickfile-immortalwrt-25.12.2-x86_64
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: quickfile-build-diagnostics
+          path: |
+            ${{ runner.temp }}/quickfile-build.log
+            ${{ runner.temp }}/quickfile-sdk/logs/
+            ${{ runner.temp }}/quickfile-sdk/.config
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
