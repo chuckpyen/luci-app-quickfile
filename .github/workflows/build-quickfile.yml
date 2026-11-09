@@ -49,11 +49,8 @@ jobs:
 
       - name: Configure feeds and packages
         run: |
-          # Pin feeds to the revisions published with ImmortalWrt 25.12.2.
-          cat > "$SDK_DIR/feeds.conf" <<'EOF'
-          src-git packages https://github.com/immortalwrt/packages.git^84bd86384928955b568988ca0e09e2c78c75173d
-          src-git luci https://github.com/immortalwrt/luci.git^d6167ea0645cbd1327708d85f94824f42d0eb872
-          EOF
+          # Keep the SDK's pinned base feed and all accompanying feeds.
+          cp "$SDK_DIR/feeds.conf.default" "$SDK_DIR/feeds.conf"
           mkdir -p "$SDK_DIR/package/quickfile"
           cp -a quickfile luci-app-quickfile "$SDK_DIR/package/quickfile/"
           cd "$SDK_DIR"
@@ -76,11 +73,17 @@ jobs:
           grep -qx 'CONFIG_PACKAGE_quickfile=m' .config
           grep -qx 'CONFIG_PACKAGE_luci-app-quickfile=m' .config
 
+      - name: Verify LuCI build dependencies
+        run: |
+          cd "$SDK_DIR"
+          set -o pipefail
+          make package/feeds/luci/rpcd-mod-rrdns/compile -j2 V=s 2>&1 | tee "$RUNNER_TEMP/quickfile-build.log"
+
       - name: Compile QuickFile
         run: |
           cd "$SDK_DIR"
           set -o pipefail
-          make package/quickfile/quickfile/compile -j2 V=s 2>&1 | tee "$RUNNER_TEMP/quickfile-build.log"
+          make package/quickfile/quickfile/compile -j2 V=s 2>&1 | tee -a "$RUNNER_TEMP/quickfile-build.log"
           make package/quickfile/luci-app-quickfile/compile -j2 V=s 2>&1 | tee -a "$RUNNER_TEMP/quickfile-build.log"
 
       - name: Collect and verify APK packages
@@ -120,5 +123,17 @@ jobs:
             /tmp/quickfile-sdk/logs/
             /tmp/quickfile-sdk/.config
           include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Preserve completed packages if a later step fails
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: quickfile-recovery-packages
+          path: |
+            /tmp/quickfile-sdk/bin/packages/**/quickfile-*.apk
+            /tmp/quickfile-sdk/bin/packages/**/luci-app-quickfile-*.apk
+            /tmp/quickfile-sdk/bin/packages/**/luci-i18n-quickfile-zh-cn-*.apk
           if-no-files-found: ignore
           retention-days: 7
