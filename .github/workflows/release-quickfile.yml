@@ -1,0 +1,110 @@
+name: Publish QuickFile Release
+
+on:
+  workflow_run:
+    workflows: [Build QuickFile for ImmortalWrt 25.12.2]
+    branches: [main]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Successful QuickFile build run ID
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: quickfile-release-${{ github.event.workflow_run.id || inputs.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+
+    steps:
+      - name: Validate the successful source build
+        id: source
+        env:
+          RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
+        run: |
+          [[ "$RUN_ID" =~ ^[0-9]+$ ]]
+          gh api "repos/$GH_REPO/actions/runs/$RUN_ID" > build-run.json
+          jq -e --arg repo "$GH_REPO" '
+            .status == "completed" and .conclusion == "success" and
+            .path == ".github/workflows/build-quickfile.yml" and
+            .head_repository.full_name == $repo and
+            .head_branch == "main" and .event == "workflow_dispatch"
+          ' build-run.json
+          printf 'run_id=%s\n' "$RUN_ID" >> "$GITHUB_OUTPUT"
+          printf 'source_sha=%s\n' "$(jq -r .head_sha build-run.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Download the verified build artifact
+        uses: actions/download-artifact@v6
+        with:
+          name: quickfile-immortalwrt-25.12.2-x86_64
+          path: dist
+          run-id: ${{ steps.source.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Validate release files and prepare notes
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+          RUN_ID: ${{ steps.source.outputs.run_id }}
+        run: |
+          (cd dist && sha256sum --check SHA256SUMS)
+          grep -Fx "Source repository: $GH_REPO" dist/BUILD-INFO.txt
+          grep -Fx "Source commit: $SOURCE_SHA" dist/BUILD-INFO.txt
+          grep -Fx 'Firmware: ImmortalWrt 25.12.2' dist/BUILD-INFO.txt
+          grep -Fx 'Architecture: x86_64' dist/BUILD-INFO.txt
+          test "$(find dist -maxdepth 1 -type f -name '*.apk' | wc -l)" -eq 3
+          for prefix in quickfile luci-app-quickfile luci-i18n-quickfile-zh-cn; do
+            test "$(find dist -maxdepth 1 -type f -name "$prefix-*.apk" | wc -l)" -eq 1
+          done
+          core=$(find dist -maxdepth 1 -type f -name 'quickfile-*.apk')
+          version=$(basename "$core" .apk)
+          version="${version#quickfile-}"
+          printf 'RELEASE_TAG=quickfile-immortalwrt-25.12.2-x86_64-build-%s\n' "$RUN_ID" >> "$GITHUB_ENV"
+          printf 'RELEASE_TITLE=QuickFile %s for ImmortalWrt 25.12.2 x86-64\n' "$version" >> "$GITHUB_ENV"
+          cat > release-notes.md <<EOF
+          适用于 **ImmortalWrt 25.12.2 x86-64**。
+
+          包含 QuickFile 主程序、LuCI 界面和简体中文 APK 包，以及 SHA256 校验文件和构建信息。
+
+          [构建记录](https://github.com/$GH_REPO/actions/runs/$RUN_ID)
+
+          源码提交为 \`$SOURCE_SHA\`。
+          EOF
+
+      - name: Publish the complete release
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+        run: |
+          if gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft > release-state.txt 2>/dev/null; then
+            if grep -qx false release-state.txt; then
+              test "$(gh release view "$RELEASE_TAG" --json assets --jq '.assets | length')" -eq 5
+              gh release view "$RELEASE_TAG" --json url --jq .url >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+          else
+            gh release create "$RELEASE_TAG" --draft --target "$SOURCE_SHA" \
+              --title "$RELEASE_TITLE" --notes-file release-notes.md
+          fi
+          gh release upload "$RELEASE_TAG" dist/*.apk dist/SHA256SUMS dist/BUILD-INFO.txt --clobber
+          test "$(gh release view "$RELEASE_TAG" --json assets --jq '.assets | length')" -eq 5
+          gh release edit "$RELEASE_TAG" --draft=false --latest
+          gh release view "$RELEASE_TAG" --json url --jq .url >> "$GITHUB_STEP_SUMMARY"
