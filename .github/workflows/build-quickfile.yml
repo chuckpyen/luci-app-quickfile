@@ -59,6 +59,8 @@ jobs:
           cd "$SDK_DIR"
           ./scripts/feeds update -a
           ./scripts/feeds install -a
+          # A freshly extracted SDK has no .config until it is generated.
+          make defconfig
           # Preserve the SDK target settings while selecting these packages.
           sed -i -E '/^(# )?CONFIG_(ALL|ALL_NONSHARED|ALL_KMODS|LUCI_LANG_zh_Hans|PACKAGE_quickfile|PACKAGE_luci-app-quickfile|PACKAGE_luci-i18n-quickfile-zh-cn)(=| is not set)/d' .config
           cat >> .config <<'EOF'
